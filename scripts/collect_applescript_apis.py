@@ -7,9 +7,10 @@ import os
 import json
 import plistlib
 from pathlib import Path
-import re
 import glob
 import xml.etree.ElementTree as ET
+import re
+import html
 
 
 def get_applications():
@@ -126,146 +127,329 @@ def read_sdef_file(sdef_path):
     return None
 
 
-def parse_sdef_to_json(sdef_content, app_name):
-    """Parse SDEF XML content to a structured JSON representation."""
+def extract_description(element, debug=False):
+    """
+    Extract description from an element using multiple methods:
+    1. Check for description attribute directly
+    2. Look for documentation sub-element
+    3. Look for description sub-element
+    4. Check for comment attribute
+    """
+    if element is None:
+        return ""
+
+    # Method 1: Check description attribute
+    if "description" in element.attrib:
+        desc = element.attrib["description"].strip()
+        if desc:
+            return desc
+
+    # Method 2: Look for documentation sub-element
+    doc_elem = element.find("./documentation")
+    if doc_elem is not None:
+        # Extract text from the documentation element
+        doc_text = get_text_content(doc_elem)
+        if doc_text:
+            return doc_text
+
+    # Method 3: Look for description sub-element
+    desc_elem = element.find("./description")
+    if desc_elem is not None:
+        desc_text = get_text_content(desc_elem)
+        if desc_text:
+            return desc_text
+
+    # Method 4: Check for comment attribute
+    if "comment" in element.attrib:
+        comment = element.attrib["comment"].strip()
+        if comment:
+            return comment
+
+    # Method 5: Check for a summary element
+    summary_elem = element.find("./summary")
+    if summary_elem is not None:
+        summary_text = get_text_content(summary_elem)
+        if summary_text:
+            return summary_text
+
+    return ""
+
+
+def get_text_content(element, default=""):
+    """Extract text content from an element, including nested elements."""
+    if element is None:
+        return default
+
+    # Start with the element's direct text
+    all_text = []
+    if element.text and element.text.strip():
+        all_text.append(element.text.strip())
+
+    # Process all child elements
+    for child in element:
+        if child.tag in ["html", "cocoa", "p", "text"]:
+            # For HTML content, try to extract it as plain text
+            html_content = ET.tostring(child, encoding="unicode", method="html")
+            # Basic HTML-to-text conversion
+            html_content = html_content.replace("<br>", "\n").replace("<br/>", "\n")
+            # Use the html module to unescape entities
+            plain_text = html.unescape(re.sub(r"<[^>]+>", " ", html_content))
+            plain_text = re.sub(r"\s+", " ", plain_text).strip()
+            if plain_text:
+                all_text.append(plain_text)
+        else:
+            # Recursively get text from other elements
+            child_text = get_text_content(child)
+            if child_text:
+                all_text.append(child_text)
+
+        # Also check if there's tail text
+        if child.tail and child.tail.strip():
+            all_text.append(child.tail.strip())
+
+    result = " ".join(all_text)
+    return result or default
+
+
+def find_coercion_for_type(coercions, type_name):
+    """Find coercion information for a specific type."""
+    if not coercions:
+        return None
+    for coercion in coercions:
+        if coercion.get("type") == type_name:
+            return coercion
+    return None
+
+
+def parse_sdef_to_comprehensive_json(sdef_content, app_name):
+    """Parse SDEF XML content to a comprehensive JSON representation including descriptions."""
     if not sdef_content:
-        return {
-            "applicationName": app_name,
-            "classes": [],
-            "commands": [],
-            "enumerations": [],
-        }
+        return {"applicationName": app_name, "suites": []}
 
     try:
-        # Try to use ElementTree for more reliable XML parsing
+        # Parse XML
         root = ET.fromstring(sdef_content)
 
-        parsed_data = {
-            "applicationName": app_name,
-            "classes": [],
-            "commands": [],
-            "enumerations": [],
-        }
+        # Create the base structure
+        parsed_data = {"applicationName": app_name, "suites": [], "coercions": []}
 
-        # Parse classes
-        for class_elem in root.findall(".//class"):
-            class_data = {"name": class_elem.get("name", ""), "properties": []}
+        # Get dictionary description if available
+        dictionary = root.find(".//dictionary")
+        if dictionary is not None:
+            parsed_data["description"] = extract_description(dictionary)
+            # Check for application version
+            dictionary_version = dictionary.get("version", "")
+            if dictionary_version:
+                parsed_data["version"] = dictionary_version
+            else:
+                version_elem = dictionary.find('.//documentation[@key="version"]')
+                if version_elem is not None:
+                    parsed_data["version"] = get_text_content(version_elem)
 
-            # Parse properties
-            for prop in class_elem.findall(".//property"):
-                class_data["properties"].append(
-                    {"name": prop.get("name", ""), "type": prop.get("type", "")}
-                )
+        # Process coercions (type conversions)
+        for coercion in root.findall(".//coercion"):
+            coercion_data = {
+                "from": coercion.get("from", ""),
+                "to": coercion.get("to", ""),
+                "description": extract_description(coercion),
+            }
+            parsed_data["coercions"].append(coercion_data)
 
-            parsed_data["classes"].append(class_data)
+        # Process each suite
+        for suite in root.findall(".//suite"):
+            suite_name = suite.get("name", "")
+            print(f"  Processing suite: {suite_name}")
 
-        # Parse commands
-        for cmd_elem in root.findall(".//command"):
-            cmd_data = {"name": cmd_elem.get("name", ""), "parameters": []}
+            suite_data = {
+                "name": suite_name,
+                "code": suite.get("code", ""),
+                "description": extract_description(suite),
+                "classes": [],
+                "commands": [],
+                "events": [],
+                "enumerations": [],
+            }
 
-            # Parse parameters
-            for param in cmd_elem.findall(".//parameter"):
-                cmd_data["parameters"].append(
-                    {"name": param.get("name", ""), "type": param.get("type", "")}
-                )
+            # Process classes
+            for cls in suite.findall("./class"):
+                cls_name = cls.get("name", "")
+                print(f"    Processing class: {cls_name}")
 
-            parsed_data["commands"].append(cmd_data)
+                cls_data = {
+                    "name": cls_name,
+                    "code": cls.get("code", ""),
+                    "inherits": cls.get("inherits", ""),
+                    "plural": cls.get("plural", ""),
+                    "description": extract_description(cls),
+                    "properties": [],
+                    "elements": [],
+                    "responds_to": [],
+                    "contents": [],
+                }
 
-        # Parse enumerations
-        for enum_elem in root.findall(".//enumeration"):
-            enum_data = {"name": enum_elem.get("name", ""), "enumerators": []}
+                # Process contents (what this class contains)
+                contents_elem = cls.find("./contents")
+                if contents_elem is not None:
+                    for content_type in contents_elem.findall("./*"):
+                        cls_data["contents"].append(
+                            {
+                                "type": content_type.tag,
+                                "name": content_type.get("name", ""),
+                                "description": extract_description(content_type),
+                            }
+                        )
 
-            # Parse enumerators
-            for enumerator in enum_elem.findall(".//enumerator"):
-                enum_data["enumerators"].append(
-                    {
+                # Process properties
+                for prop in cls.findall("./property"):
+                    prop_name = prop.get("name", "")
+                    print(f"      Processing property: {prop_name}")
+
+                    prop_data = {
+                        "name": prop_name,
+                        "code": prop.get("code", ""),
+                        "type": prop.get("type", ""),
+                        "access": prop.get("access", ""),  # r/o, w/o, or r/w
+                        "description": extract_description(prop),
+                    }
+                    cls_data["properties"].append(prop_data)
+
+                # Process elements (contained by this class)
+                for elem in cls.findall("./element"):
+                    elem_data = {
+                        "type": elem.get("type", ""),
+                        "access": elem.get("access", ""),
+                        "description": extract_description(elem),
+                    }
+                    cls_data["elements"].append(elem_data)
+
+                # Process responds-to section
+                responds_to = cls.find("./responds-to")
+                if responds_to is not None:
+                    for cmd in responds_to.findall("./command"):
+                        cls_data["responds_to"].append(cmd.get("name", ""))
+
+                suite_data["classes"].append(cls_data)
+
+            # Process commands
+            for cmd in suite.findall("./command"):
+                cmd_name = cmd.get("name", "")
+                print(f"    Processing command: {cmd_name}")
+
+                cmd_data = {
+                    "name": cmd_name,
+                    "code": cmd.get("code", ""),
+                    "description": extract_description(cmd),
+                    "parameters": [],
+                    "result": {},
+                }
+
+                # Process direct parameter (if any)
+                direct_param = cmd.find("./direct-parameter")
+                if direct_param is not None:
+                    cmd_data["direct_parameter"] = {
+                        "type": direct_param.get("type", ""),
+                        "description": extract_description(direct_param),
+                        "optional": direct_param.get("optional", "no") == "yes",
+                    }
+
+                # Process parameters
+                for param in cmd.findall("./parameter"):
+                    param_data = {
+                        "name": param.get("name", ""),
+                        "code": param.get("code", ""),
+                        "type": param.get("type", ""),
+                        "description": extract_description(param),
+                        "optional": param.get("optional", "no") == "yes",
+                    }
+                    cmd_data["parameters"].append(param_data)
+
+                # Process result
+                result = cmd.find("./result")
+                if result is not None:
+                    cmd_data["result"] = {
+                        "type": result.get("type", ""),
+                        "description": extract_description(result),
+                    }
+
+                suite_data["commands"].append(cmd_data)
+
+            # Process events
+            for event in suite.findall("./event"):
+                event_data = {
+                    "name": event.get("name", ""),
+                    "code": event.get("code", ""),
+                    "description": extract_description(event),
+                    "parameters": [],
+                    "result": {},
+                }
+
+                # Process parameters
+                for param in event.findall("./parameter"):
+                    param_data = {
+                        "name": param.get("name", ""),
+                        "code": param.get("code", ""),
+                        "type": param.get("type", ""),
+                        "description": extract_description(param),
+                        "optional": param.get("optional", "no") == "yes",
+                    }
+                    event_data["parameters"].append(param_data)
+
+                # Process result
+                result = event.find("./result")
+                if result is not None:
+                    event_data["result"] = {
+                        "type": result.get("type", ""),
+                        "description": extract_description(result),
+                    }
+
+                suite_data["events"].append(event_data)
+
+            # Process enumerations
+            for enum in suite.findall("./enumeration"):
+                enum_data = {
+                    "name": enum.get("name", ""),
+                    "code": enum.get("code", ""),
+                    "description": extract_description(enum),
+                    "enumerators": [],
+                }
+
+                # Process enumerators
+                for enumerator in enum.findall("./enumerator"):
+                    enumerator_data = {
                         "name": enumerator.get("name", ""),
                         "code": enumerator.get("code", ""),
+                        "description": extract_description(enumerator),
                     }
-                )
+                    enum_data["enumerators"].append(enumerator_data)
 
-            parsed_data["enumerations"].append(enum_data)
+                suite_data["enumerations"].append(enum_data)
+
+            parsed_data["suites"].append(suite_data)
+
+        # Process relationships between classes
+        for suite in parsed_data["suites"]:
+            for cls in suite["classes"]:
+                # Add "contained by" information by looking for elements that reference this class
+                contained_by = []
+                for s in parsed_data["suites"]:
+                    for c in s["classes"]:
+                        for elem in c["elements"]:
+                            if elem["type"] == cls["name"]:
+                                contained_by.append(
+                                    {"class": c["name"], "suite": s["name"]}
+                                )
+
+                if contained_by:
+                    cls["contained_by"] = contained_by
 
         return parsed_data
 
     except Exception as e:
-        print(f"  Error parsing XML with ElementTree: {e}")
-        # Fall back to regex-based parsing if ElementTree fails
-        return fallback_parse_sdef(sdef_content, app_name)
+        print(f"  Error parsing XML: {e}")
+        import traceback
 
-
-def fallback_parse_sdef(sdef_content, app_name):
-    """Fallback method using regex to parse SDEF when XML parsing fails."""
-    parsed_data = {
-        "applicationName": app_name,
-        "classes": [],
-        "commands": [],
-        "enumerations": [],
-    }
-
-    # Extract class definitions
-    class_matches = re.finditer(
-        r'<class name="([^"]+)"[^>]*>.*?</class>', sdef_content, re.DOTALL
-    )
-    for match in class_matches:
-        class_name = match.group(1)
-        class_content = match.group(0)
-
-        # Extract properties
-        properties = []
-        prop_matches = re.finditer(
-            r'<property name="([^"]+)"[^>]*?type="([^"]+)"', class_content
-        )
-        for prop_match in prop_matches:
-            properties.append(
-                {"name": prop_match.group(1), "type": prop_match.group(2)}
-            )
-
-        parsed_data["classes"].append({"name": class_name, "properties": properties})
-
-    # Extract command definitions
-    cmd_matches = re.finditer(
-        r'<command name="([^"]+)"[^>]*>.*?</command>', sdef_content, re.DOTALL
-    )
-    for match in cmd_matches:
-        cmd_name = match.group(1)
-        cmd_content = match.group(0)
-
-        # Extract parameters
-        parameters = []
-        param_matches = re.finditer(
-            r'<parameter name="([^"]+)"[^>]*?type="([^"]+)"', cmd_content
-        )
-        for param_match in param_matches:
-            parameters.append(
-                {"name": param_match.group(1), "type": param_match.group(2)}
-            )
-
-        parsed_data["commands"].append({"name": cmd_name, "parameters": parameters})
-
-    # Extract enumerations
-    enum_matches = re.finditer(
-        r'<enumeration name="([^"]+)"[^>]*>.*?</enumeration>', sdef_content, re.DOTALL
-    )
-    for match in enum_matches:
-        enum_name = match.group(1)
-        enum_content = match.group(0)
-
-        # Extract enumerators
-        enumerators = []
-        enumerator_matches = re.finditer(
-            r'<enumerator name="([^"]+)"[^>]*?code="([^"]+)"', enum_content
-        )
-        for enum_match in enumerator_matches:
-            enumerators.append(
-                {"name": enum_match.group(1), "code": enum_match.group(2)}
-            )
-
-        parsed_data["enumerations"].append(
-            {"name": enum_name, "enumerators": enumerators}
-        )
-
-    return parsed_data
+        traceback.print_exc()
+        return {"applicationName": app_name, "suites": [], "error": str(e)}
 
 
 def main():
