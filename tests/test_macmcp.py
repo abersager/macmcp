@@ -14,6 +14,7 @@ from macmcp.macmcp import (
     save_config,
     run_applescript_command,
     register_app_commands,
+    register_app_resources,
     initialize_server,
     get_active_apps,
     get_inactive_apps,
@@ -26,6 +27,7 @@ from macmcp.macmcp import (
     get_command_info,
     CONFIG_FILE,
     get_app_resource,
+    list_app_resources,
 )
 
 # Test data
@@ -485,6 +487,202 @@ def test_calendar_list_all_calendars_resource():
 
         # Verify that we received a non-empty list of calendars
         assert calendars, "No calendars found"
+
+        # Clean up - manually clean up instead of using deactivate_app
+        print("Cleaning up...")
+        macmcp.macmcp.active_apps.discard("Calendar")
+        macmcp.macmcp.save_config(macmcp.macmcp.active_apps)
+        print("Test complete!")
+
+    except Exception as e:
+        # Make sure the app is cleaned up even if the test fails
+        try:
+            # Manual cleanup instead of deactivate_app
+            macmcp.macmcp.active_apps.discard("Calendar")
+            macmcp.macmcp.save_config(macmcp.macmcp.active_apps)
+        except Exception as cleanup_error:
+            print(f"Error during cleanup: {cleanup_error}")
+        raise e
+
+
+def test_list_app_resources_not_registered():
+    """Test listing resources for an app that isn't registered"""
+    # Setup empty registered and active apps
+    with patch("macmcp.macmcp.registered_apps", {}):
+        with patch("macmcp.macmcp.active_apps", set()):
+            result = list_app_resources("NotFoundApp")
+            assert "error" in result
+            assert "not registered or activated" in result["error"]
+            assert "suggestion" in result
+
+
+def test_list_app_resources_for_calendar():
+    """Test listing resources for the Calendar app"""
+    # Setup Calendar as registered/active
+    with patch("macmcp.macmcp.registered_apps", {"Calendar": []}):
+        with patch("macmcp.macmcp.active_apps", {"Calendar"}):
+            result = list_app_resources("Calendar")
+            print(result)
+
+            # Check structure
+            assert "basic_properties" in result
+            assert "classes" in result
+            assert "collections" in result
+            assert "examples" in result
+
+            # Check content
+            assert "name" in result["basic_properties"]
+            assert "calendar" in result["classes"]
+            assert "calendars" in result["collections"]
+            assert any("name of calendars" in ex for ex in result["examples"])
+
+
+def test_list_app_resources_for_generic_app():
+    """Test listing resources for an app without specific knowledge"""
+    # Setup GenericApp as registered/active
+    with patch("macmcp.macmcp.registered_apps", {"GenericApp": []}):
+        with patch("macmcp.macmcp.active_apps", {"GenericApp"}):
+            result = list_app_resources("GenericApp")
+
+            # Check structure
+            assert "basic_properties" in result
+            assert "generic_examples" in result
+            assert "note" in result
+
+            # Check content
+            assert "name" in result["basic_properties"]
+            assert any("properties" in ex for ex in result["generic_examples"])
+
+
+@pytest.mark.integration
+def test_calendar_list_resources_integration():
+    """Integration test: List available resources from Calendar app."""
+
+    try:
+        # Manually register Calendar app
+        print("Manually registering Calendar app...")
+        macmcp.macmcp.registered_apps["Calendar"] = []
+
+        # Now activate the app
+        result = activate_app("Calendar")
+        assert "Activated Calendar" in result, (
+            f"Failed to activate Calendar app: {result}"
+        )
+
+        print("Listing Calendar resources...")
+        # Get the resources available in Calendar app
+        resources = list_app_resources("Calendar")
+
+        # Verify we got valid resource data
+        assert isinstance(resources, dict), (
+            "Resources should be returned as a dictionary"
+        )
+        assert "classes" in resources, "Resource listing should include classes"
+        assert "collections" in resources, "Resource listing should include collections"
+        assert "examples" in resources, "Resource listing should include examples"
+
+        print(f"Resources found: {json.dumps(resources, indent=2)}")
+
+        # Try using one of the examples from the resource listing
+        if "examples" in resources and resources["examples"]:
+            example = resources["examples"][0]  # Get first example
+            print(f"Testing example resource query: '{example}'")
+            result = get_app_resource("Calendar", example)
+
+            # Verify we got a result that's not an error
+            assert not str(result).startswith("Error:"), (
+                f"Failed to retrieve resource using example query: {result}"
+            )
+
+            print(f"Example query result: {result}")
+
+        # Clean up - manually clean up instead of using deactivate_app
+        print("Cleaning up...")
+        macmcp.macmcp.active_apps.discard("Calendar")
+        macmcp.macmcp.save_config(macmcp.macmcp.active_apps)
+        print("Test complete!")
+
+    except Exception as e:
+        # Make sure the app is cleaned up even if the test fails
+        try:
+            # Manual cleanup instead of deactivate_app
+            macmcp.macmcp.active_apps.discard("Calendar")
+            macmcp.macmcp.save_config(macmcp.macmcp.active_apps)
+        except Exception as cleanup_error:
+            print(f"Error during cleanup: {cleanup_error}")
+        raise e
+
+
+def test_register_app_resources(mock_mcp):
+    """Test registering resource access tools for an application"""
+    app_name = "Calendar"
+
+    # Define mock app resources
+    mock_resources = {
+        "basic_properties": ["name", "version"],
+        "collections": ["calendars", "events"],
+        "classes": ["calendar", "event"],
+        "examples": ["name of calendars"],
+    }
+
+    # Setup the Calendar app as active
+    with patch("macmcp.macmcp.active_apps", {app_name}):
+        # Mock the list_app_resources function to return our test data
+        with patch("macmcp.macmcp.list_app_resources", return_value=mock_resources):
+            # Patch the mcp instance
+            with patch("macmcp.macmcp.mcp", mock_mcp):
+                # Call the function
+                register_app_resources(app_name)
+
+                # Check if the expected resource functions were registered as tools
+                assert "calendar_get_calendars" in mock_mcp.tools
+                assert "calendar_get_events" in mock_mcp.tools
+                assert "calendar_get_calendars_names" in mock_mcp.tools
+                assert "calendar_get_name" in mock_mcp.tools
+                assert "calendar_get_version" in mock_mcp.tools
+
+
+@pytest.mark.integration
+def test_calendar_dynamic_resource_tools_integration():
+    """Integration test: Use dynamically created resource tools for Calendar app."""
+
+    try:
+        # Manually register Calendar app
+        print("Manually registering Calendar app...")
+        macmcp.macmcp.registered_apps["Calendar"] = []
+
+        # Now activate the app (which registers resource tools)
+        result = activate_app("Calendar")
+        assert "Activated Calendar" in result, (
+            f"Failed to activate Calendar app: {result}"
+        )
+
+        # Check if the resource tools were created in the module
+        assert hasattr(macmcp.macmcp, "calendar_get_calendars"), (
+            "calendar_get_calendars function not created"
+        )
+        assert hasattr(macmcp.macmcp, "calendar_get_calendars_names"), (
+            "calendar_get_calendars_names function not created"
+        )
+
+        print("Testing dynamically created resource tools...")
+        # Use the dynamically created functions to get calendar resources
+        calendars_names = macmcp.macmcp.calendar_get_calendars_names()
+
+        # Verify we got a result that's not an error
+        assert not str(calendars_names).startswith("Error:"), (
+            f"Failed to retrieve calendar names: {calendars_names}"
+        )
+
+        print(f"Calendar names found via dynamic resource tool: {calendars_names}")
+
+        # Try using a property access function if it was created
+        if hasattr(macmcp.macmcp, "calendar_get_name"):
+            app_name = macmcp.macmcp.calendar_get_name()
+            print(f"Calendar app name: {app_name}")
+            assert not str(app_name).startswith("Error:"), (
+                f"Failed to retrieve app name: {app_name}"
+            )
 
         # Clean up - manually clean up instead of using deactivate_app
         print("Cleaning up...")

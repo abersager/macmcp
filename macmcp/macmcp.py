@@ -88,6 +88,9 @@ def activate_app(app_name: str) -> str:
             except Exception as e:
                 debug_print(f"Error loading API file {api_file}: {e}")
 
+    # Register resource access functions for this app
+    register_app_resources(app_name)
+
     return f"Activated {app_name}"
 
 
@@ -379,6 +382,11 @@ def initialize_server():
     debug_print("Loading AppleScript APIs...")
     load_applescript_apis()  # Calls register_app_commands which reads global active_apps
 
+    debug_print("Registering resource access tools...")
+    # Register resource tools for all active apps
+    for app_name in active_apps:
+        register_app_resources(app_name)
+
     debug_print("MCP Server initialization complete.")
     active_count = len(active_apps)
     registered_count = sum(len(cmds) for cmds in registered_apps.values())
@@ -428,6 +436,205 @@ end tell
     except Exception as e:
         debug_print(f"Error executing AppleScript: {e}")
         return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def list_app_resources(app_name: str) -> Dict[str, Any]:
+    """
+    List available resources (objects, properties, and collections) for an application.
+
+    This function helps discover what resources can be queried using get_app_resource.
+
+    Args:
+        app_name: The name of the application to introspect
+
+    Returns:
+        A dictionary containing available resource categories and examples
+    """
+    if app_name not in registered_apps and app_name not in active_apps:
+        return {
+            "error": f"Application '{app_name}' not registered or activated",
+            "suggestion": "Use list_applescript_apps() to see available apps",
+        }
+
+    # Common basic properties that most apps have
+    basic_properties = ["name", "version", "frontmost"]
+
+    # Get class names and their properties for specific apps
+    if app_name == "Calendar":
+        return {
+            "basic_properties": basic_properties,
+            "classes": ["calendar", "event", "reminder"],
+            "collections": ["calendars", "events", "reminders"],
+            "examples": [
+                "name of calendars",
+                "name of events",
+                'calendars whose name contains "Work"',
+                "events whose start date > (current date)",
+                "properties of calendars",
+                "count of calendars",
+            ],
+        }
+    elif app_name == "Contacts":
+        return {
+            "basic_properties": basic_properties,
+            "classes": ["person", "group"],
+            "collections": ["people", "groups"],
+            "examples": [
+                "name of people",
+                "name of groups",
+                "email of people",
+                'people whose name contains "Smith"',
+                "properties of people",
+                "count of people",
+            ],
+        }
+    elif app_name == "Music" or app_name == "iTunes":
+        return {
+            "basic_properties": basic_properties,
+            "classes": ["track", "playlist", "artist", "album"],
+            "collections": ["tracks", "playlists", "artists", "albums"],
+            "examples": [
+                "name of playlists",
+                "name of tracks",
+                "artist of tracks",
+                'tracks whose artist contains "Beatles"',
+                "properties of playlists",
+                "count of tracks",
+            ],
+        }
+    elif app_name == "Finder":
+        return {
+            "basic_properties": basic_properties,
+            "classes": ["file", "folder", "disk", "window"],
+            "collections": ["files", "folders", "disks", "windows"],
+            "examples": [
+                "name of folders",
+                "name of files",
+                "count of windows",
+                'files whose name contains ".txt"',
+                "properties of folders",
+            ],
+        }
+
+    # For apps we don't have specific knowledge about, try to get some basic info
+    # and provide generic examples
+    return {
+        "basic_properties": basic_properties,
+        "generic_examples": [
+            "name",
+            "version",
+            "frontmost",
+            "properties",  # Get all properties
+            "count of windows",
+            "name of windows",
+        ],
+        "note": "Use get_app_resource to query these properties",
+    }
+
+
+def register_app_resources(app_name: str):
+    """
+    Register resource access tools for an application.
+    This creates functions like app_get_resource_name() that directly access common resources.
+    """
+    if app_name not in active_apps:
+        debug_print(f"Skipping resource registration for inactive app: {app_name}")
+        return
+
+    debug_print(f"Registering resource access tools for {app_name}")
+
+    # Get information about the app's resources
+    resources = list_app_resources(app_name)
+
+    # Register collection access functions
+    if "collections" in resources:
+        for collection in resources["collections"]:
+            # Create function name: calendar_get_calendars, contacts_get_people, etc.
+            func_name = f"{app_name.lower().replace(' ', '_')}_get_{collection}"
+
+            # Skip if function already exists
+            if func_name in globals():
+                continue
+
+            # Create function code
+            func_def = f"def {func_name}():"
+            body = [
+                f'    """Get all {collection} from {app_name}"""',
+                "    try:",
+                f'        return get_app_resource("{app_name}", "{collection}")',
+                "    except Exception as e:",
+                "        return f'Error: {str(e)}'",
+            ]
+
+            func_code = "\n".join([func_def] + body)
+
+            # Create the function
+            debug_print(f"Creating resource access function:\n{func_code}")
+            exec_globals = globals().copy()
+            exec(func_code, exec_globals)
+
+            # Get the function and register it as a tool
+            func = exec_globals[func_name]
+            mcp.tool()(func)
+            globals()[func_name] = func
+
+            # Also create a function to get names of the collection
+            name_func_name = (
+                f"{app_name.lower().replace(' ', '_')}_get_{collection}_names"
+            )
+            name_func_def = f"def {name_func_name}():"
+            name_body = [
+                f'    """Get names of all {collection} from {app_name}"""',
+                "    try:",
+                f'        return get_app_resource("{app_name}", "name of {collection}")',
+                "    except Exception as e:",
+                "        return f'Error: {str(e)}'",
+            ]
+
+            name_func_code = "\n".join([name_func_def] + name_body)
+
+            # Create the name function
+            debug_print(f"Creating resource name function:\n{name_func_code}")
+            name_exec_globals = globals().copy()
+            exec(name_func_code, name_exec_globals)
+
+            # Get the function and register it as a tool
+            name_func = name_exec_globals[name_func_name]
+            mcp.tool()(name_func)
+            globals()[name_func_name] = name_func
+
+    # Register property access functions for basic properties
+    if "basic_properties" in resources:
+        for prop in resources["basic_properties"]:
+            # Create function name: calendar_get_name, contacts_get_version, etc.
+            func_name = f"{app_name.lower().replace(' ', '_')}_get_{prop}"
+
+            # Skip if function already exists
+            if func_name in globals():
+                continue
+
+            # Create function code
+            func_def = f"def {func_name}():"
+            body = [
+                f'    """Get {prop} of {app_name}"""',
+                "    try:",
+                f'        return get_app_resource("{app_name}", "{prop}")',
+                "    except Exception as e:",
+                "        return f'Error: {str(e)}'",
+            ]
+
+            func_code = "\n".join([func_def] + body)
+
+            # Create the function
+            debug_print(f"Creating property function:\n{func_code}")
+            exec_globals = globals().copy()
+            exec(func_code, exec_globals)
+
+            # Get the function and register it as a tool
+            func = exec_globals[func_name]
+            mcp.tool()(func)
+            globals()[func_name] = func
 
 
 if __name__ == "__main__":
