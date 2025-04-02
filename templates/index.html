@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Tool Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .app-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .app-item {
+            transition: all 0.2s;
+        }
+        .app-item:hover {
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-8">MCP Tool Manager</h1>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <!-- Active Apps -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">Active Applications</h2>
+                    <button onclick="deactivateAll()" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 transition">
+                        Deactivate All
+                    </button>
+                </div>
+                <div id="active-apps" class="app-list space-y-2">
+                    <!-- Active apps will be populated here -->
+                </div>
+            </div>
+
+            <!-- Inactive Apps -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold text-gray-700">Inactive Applications</h2>
+                    <button onclick="activateAll()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 transition">
+                        Activate All
+                    </button>
+                </div>
+                <div id="inactive-apps" class="app-list space-y-2">
+                    <!-- Inactive apps will be populated here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Function to load apps
+        async function loadApps() {
+            try {
+                const [activeResponse, inactiveResponse] = await Promise.all([
+                    fetch('/api/active-apps'),
+                    fetch('/api/inactive-apps')
+                ]);
+
+                const activeApps = await activeResponse.json();
+                const inactiveApps = await inactiveResponse.json();
+
+                displayApps('active-apps', activeApps, true);
+                displayApps('inactive-apps', inactiveApps, false);
+            } catch (error) {
+                console.error('Error loading apps:', error);
+            }
+        }
+
+        // Function to display apps in a list
+        function displayApps(containerId, apps, isActive) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            apps.forEach(app => {
+                const div = document.createElement('div');
+                div.className = 'app-item flex justify-between items-center p-3 bg-gray-50 rounded';
+
+                const name = document.createElement('span');
+                name.className = 'text-gray-700';
+                name.textContent = app;
+
+                const button = document.createElement('button');
+                button.className = isActive
+                    ? 'bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600 transition'
+                    : 'bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 transition';
+                button.textContent = isActive ? 'Deactivate' : 'Activate';
+                button.onclick = () => isActive ? deactivateApp(app) : activateApp(app);
+
+                div.appendChild(name);
+                div.appendChild(button);
+                container.appendChild(div);
+            });
+        }
+
+        // Function to activate an app
+        async function activateApp(appName) {
+            try {
+                const response = await fetch(`/api/activate/${encodeURIComponent(appName)}`);
+                const result = await response.json();
+                console.log(result);
+                loadApps(); // Reload the lists
+            } catch (error) {
+                console.error('Error activating app:', error);
+            }
+        }
+
+        // Function to deactivate an app
+        async function deactivateApp(appName) {
+            try {
+                const response = await fetch(`/api/deactivate/${encodeURIComponent(appName)}`);
+                const result = await response.json();
+                console.log(result);
+                loadApps(); // Reload the lists
+            } catch (error) {
+                console.error('Error deactivating app:', error);
+            }
+        }
+
+        // Function to activate all apps
+        async function activateAll() {
+            try {
+                const response = await fetch('/api/activate-all');
+                const result = await response.json();
+                console.log(result);
+                loadApps(); // Reload the lists
+            } catch (error) {
+                console.error('Error activating all apps:', error);
+            }
+        }
+
+        // Function to deactivate all apps
+        async function deactivateAll() {
+            try {
+                const response = await fetch('/api/deactivate-all');
+                const result = await response.json();
+                console.log(result);
+                loadApps(); // Reload the lists
+            } catch (error) {
+                console.error('Error deactivating all apps:', error);
+            }
+        }
+
+        // Load apps when the page loads
+        document.addEventListener('DOMContentLoaded', loadApps);
+    </script>
+</body>
+</html>

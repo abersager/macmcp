@@ -15,4 +15,12 @@ dependencies = [
     "requests (>=2.32.3,<3.0.0)",
     "mcp[cli]>=1.4.1,<2.0.0",
     "httpx>=0.28.1",
+    "flask>=3.1.0",
+    "fastmcp>=0.4.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.0",
 ]

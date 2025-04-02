@@ -266,67 +266,79 @@ def register_app_commands(app_name: str, api_data: Dict[str, Any]):
         return
 
     debug_print(f"Registering commands for {app_name}")
-    registered_apps[app_name] = []
+    # Initialize the list for the app if it doesn't exist
+    if app_name not in registered_apps:
+        registered_apps[app_name] = []
 
-    for cmd in api_data.get("commands", []):
-        try:
-            command_name = cmd["name"]
-            registered_apps[app_name].append(command_name)
+    # Iterate through suites, then commands within each suite
+    for suite in api_data.get("suites", []):
+        for cmd in suite.get("commands", []):
+            try:
+                command_name = cmd["name"]
+                # Avoid duplicate command registration if multiple suites define it
+                if command_name not in registered_apps[app_name]:
+                    registered_apps[app_name].append(command_name)
 
-            # Create a unique function name by prefixing with app name
-            func_name = f"{app_name.lower().replace(' ', '_')}_{command_name.lower().replace(' ', '_').replace('-', '_')}"
+                # Create a unique function name by prefixing with app name
+                func_name = f"{app_name.lower().replace(' ', '_')}_{command_name.lower().replace(' ', '_').replace('-', '_')}"
 
-            # Build parameter definitions
-            params = []
-            for param in cmd.get("parameters", []):
-                param_name = param["name"]
-                # Handle Python reserved keywords
-                if param_name in keyword.kwlist:
-                    param_name = f"_{param_name}"
+                # Build parameter definitions
+                params = []
+                for param in cmd.get("parameters", []):
+                    param_name = param["name"]
+                    # Sanitize the name: replace spaces and hyphens with underscores
+                    param_name = param_name.replace(" ", "_").replace("-", "_")
 
-                if param.get("required", True):
-                    params.append(param_name)
-                else:
-                    default_value = param.get("default", None)
-                    if default_value is None:
-                        default_value = "None"
-                    elif isinstance(default_value, str):
-                        default_value = f"'{default_value}'"
-                    params.append(f"{param_name}={default_value}")
+                    # Handle Python reserved keywords by appending underscore
+                    if keyword.iskeyword(param_name):
+                        param_name = f"{param_name}_"
 
-            # Create the function definition
-            func_def = f"def {func_name}({', '.join(params)}):"
+                    if param.get("required", True):
+                        params.append(param_name)
+                    else:
+                        default_value = param.get("default", None)
+                        if default_value is None:
+                            default_value = "None"
+                        elif isinstance(default_value, str):
+                            default_value = f"'{default_value}'"
+                        params.append(f"{param_name}={default_value}")
 
-            # Build the function body
-            body = []
-            body.append(
-                '    """'
-                + cmd.get("description", "Execute AppleScript command")
-                + '"""'
-            )
-            body.append("    try:")
-            body.append("        return run_applescript_command(")
-            body.append(f"            '{app_name}',")
-            body.append(f"            '{command_name}',")
-            body.append("            locals()")
-            body.append("        )")
-            body.append("    except Exception as e:")
-            body.append("        return f'Error: {str(e)}'")
+                # Create the function definition
+                func_def = f"def {func_name}({', '.join(params)}):"
 
-            # Create the function
-            func_code = "\n".join([func_def] + body)
-            debug_print(f"Creating function:\n{func_code}")
+                # Build the function body
+                body = []
+                body.append(
+                    '    """'
+                    + cmd.get("description", "Execute AppleScript command")
+                    + '"""'
+                )
+                body.append("    try:")
+                body.append("        return run_applescript_command(")
+                body.append(f"            '{app_name}',")
+                body.append(f"            '{command_name}',")
+                body.append("            locals()")
+                body.append("        )")
+                body.append("    except Exception as e:")
+                body.append("        return f'Error: {str(e)}'")
 
-            # Add the function to the global namespace
-            exec(func_code, globals())
+                # Create the function
+                func_code = "\n".join([func_def] + body)
+                # Avoid re-creating/re-registering function if already done
+                if func_name not in globals():
+                    debug_print(f"Creating function:\n{func_code}")
+                    # Add the function to the global namespace
+                    exec(func_code, globals())
 
-            # Register the function as an MCP tool
-            func = globals()[func_name]
-            mcp.tool()(func)
+                    # Register the function as an MCP tool
+                    func = globals()[func_name]
+                    mcp.tool()(func)
 
-        except Exception as e:
-            debug_print(f"Error registering command {command_name} for {app_name}: {e}")
-            continue
+            except Exception as e:
+                debug_print(
+                    f"Error registering command {command_name} for {app_name} in suite {suite.get('name')}: {e}"
+                )
+                continue
 
 
 @mcp.tool()
