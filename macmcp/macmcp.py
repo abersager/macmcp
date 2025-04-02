@@ -406,9 +406,10 @@ def get_app_resource(app_name: str, resource_path: str) -> Any:
     Args:
         app_name: The name of the application to query
         resource_path: The resource path to retrieve (e.g. 'name of calendars', 'events of calendar "Work"')
+                      or an AppleScript command to execute (e.g. 'make new event...')
 
     Returns:
-        The value of the requested resource
+        The value of the requested resource or result of the command
     """
     if app_name not in registered_apps and app_name not in active_apps:
         return f"Error: Application '{app_name}' not registered or activated"
@@ -416,7 +417,7 @@ def get_app_resource(app_name: str, resource_path: str) -> Any:
     try:
         script = f"""
 tell application "{app_name}"
-    get {resource_path}
+    {resource_path}
 end tell
 """
         debug_print(f"Executing AppleScript for resource retrieval:\n{script}")
@@ -430,7 +431,20 @@ end tell
 
         if result.returncode != 0:
             debug_print(f"AppleScript error: {result.stderr}")
-            return f"Error: {result.stderr.strip()}"
+            error_msg = result.stderr.strip()
+
+            # Provide more helpful information for common errors
+            if "syntax error" in error_msg:
+                if "date" in error_msg:
+                    return f'Error: {error_msg}\n\nSuggestion: AppleScript date formats can be tricky. Try using one of these formats:\n- date "2023-04-15 14:30:00"\n- current date\n- (current date) + 30 * minutes'
+                elif "Expected" in error_msg and "but found" in error_msg:
+                    return f"Error: {error_msg}\n\nSuggestion: This appears to be an AppleScript syntax error. Check the command structure. For reference, use list_app_resources('{app_name}') to see example commands."
+            elif "Invalid date" in error_msg:
+                return f'Error: {error_msg}\n\nSuggestion: Try using the format date "YYYY-MM-DD HH:MM:SS" or current date.'
+            elif "not found" in error_msg:
+                return f"Error: {error_msg}\n\nSuggestion: The specified resource wasn't found. Check that the object exists."
+
+            return f"Error: {error_msg}"
 
         return result.stdout.strip()
     except Exception as e:
@@ -441,7 +455,8 @@ end tell
 @mcp.tool()
 def list_app_resources(app_name: str) -> Dict[str, Any]:
     """
-    List available resources (objects, properties, and collections) for an application.
+    List available resources (objects, properties, and collections) for an application
+    based on its AppleScript API definition file.
 
     This function helps discover what resources can be queried using get_app_resource.
 
@@ -460,76 +475,179 @@ def list_app_resources(app_name: str) -> Dict[str, Any]:
     # Common basic properties that most apps have
     basic_properties = ["name", "version", "frontmost"]
 
-    # Get class names and their properties for specific apps
-    if app_name == "Calendar":
+    # AppleScript date format examples - important for working with dates
+    date_format_info = {
+        "current_date": "current date",
+        "relative_date": "(current date) + 1 * days",
+        "specific_date": 'date "2023-04-15 14:30:00"',
+        "date_components": 'date "January 15, 2023 2:30:00 PM"',
+        "note": "AppleScript date formats are locale-sensitive; the safest format is YYYY-MM-DD HH:MM:SS",
+    }
+
+    # First try to find the API definition file
+    api_file_path = None
+    api_data = None
+
+    for file_name in os.listdir("applescript_apis"):
+        if file_name.endswith(".json") and not file_name == "tool_config.json":
+            try:
+                with open(os.path.join("applescript_apis", file_name), "r") as f:
+                    file_data = json.load(f)
+                    if file_data.get("applicationName") == app_name:
+                        api_file_path = os.path.join("applescript_apis", file_name)
+                        api_data = file_data
+                        break
+            except Exception as e:
+                debug_print(f"Error reading API file {file_name}: {e}")
+
+    # If we found an API definition, extract resource information
+    if api_data:
+        classes = []
+        collections = []
+        class_properties = {}
+
+        # Process all suites
+        for suite in api_data.get("suites", []):
+            # Extract classes from the suite
+            for cls in suite.get("classes", []):
+                class_name = cls.get("name", "").lower()
+                if class_name and class_name not in classes:
+                    classes.append(class_name)
+
+                    # Store properties for this class
+                    props = [prop.get("name") for prop in cls.get("properties", [])]
+                    if props:
+                        class_properties[class_name] = props
+
+                    # Add plural form as a collection if it exists
+                    plural = cls.get("plural")
+                    if plural and plural not in collections:
+                        collections.append(plural)
+                    elif not plural and class_name not in collections:
+                        # Use standard English pluralization rules if plural not specified
+                        if class_name.endswith("s"):
+                            plural_name = f"{class_name}es"
+                        elif class_name.endswith("y"):
+                            plural_name = f"{class_name[:-1]}ies"
+                        else:
+                            plural_name = f"{class_name}s"
+                        collections.append(plural_name)
+
+        # Generate examples based on the discovered classes and collections
+        creation_examples = []
+        query_examples = []
+        modification_examples = []
+
+        # Add query examples
+        for collection in collections:
+            query_examples.append(f"# Get all {collection}")
+            query_examples.append(f"{collection}")
+            query_examples.append(f"# Get names of {collection}")
+            query_examples.append(f"name of {collection}")
+
+            # Add example for filtering collection
+            query_examples.append(f"# Find {collection} by name")
+            query_examples.append(f'{collection} whose name contains "Example"')
+
+        # Add creation examples for each class
+        for cls in classes:
+            # Find the corresponding collection
+            collection = next((c for c in collections if c.startswith(cls)), None)
+            if collection:
+                creation_examples.append(f"# Create a new {cls}")
+
+                # Generate properties based on available class properties
+                property_examples = []
+                if class_properties.get(cls):
+                    # Get the first few properties that might be useful
+                    useful_props = ["name", "title", "summary", "text", "content"]
+                    prop = next(
+                        (p for p in useful_props if p in class_properties.get(cls, [])),
+                        None,
+                    )
+
+                    if prop:
+                        property_examples.append(f'{prop}:"Example {cls.title()}"')
+
+                        # Add date properties for date-related classes
+                        if (
+                            "date" in cls
+                            or cls == "event"
+                            or cls == "reminder"
+                            or cls == "appointment"
+                        ):
+                            if "start date" in class_properties.get(cls, []):
+                                property_examples.append(
+                                    'start date:date "2023-04-15 14:30:00"'
+                                )
+                            if "end date" in class_properties.get(cls, []):
+                                property_examples.append(
+                                    'end date:date "2023-04-15 15:30:00"'
+                                )
+                            elif "due date" in class_properties.get(cls, []):
+                                property_examples.append(
+                                    'due date:date "2023-04-15 15:30:00"'
+                                )
+
+                # If no specific properties were found, add a generic name property
+                if not property_examples:
+                    property_examples.append(f'name:"Example {cls.title()}"')
+
+                # Generate the full example with a generic approach
+                properties_str = ", ".join(property_examples)
+
+                # Generate creation example using the collection name as container
+                creation_examples.append(
+                    f"make new {cls} at end of {collection} with properties {{{properties_str}}}"
+                )
+
+            # Add modification example
+            modification_examples.append(f"# Modify a {cls}")
+            modification_examples.append(
+                f'set name of first {cls} to "Modified {cls.title()}"'
+            )
+
+        # Return the extracted resource information
         return {
             "basic_properties": basic_properties,
-            "classes": ["calendar", "event", "reminder"],
-            "collections": ["calendars", "events", "reminders"],
-            "examples": [
-                "name of calendars",
-                "name of events",
-                'calendars whose name contains "Work"',
-                "events whose start date > (current date)",
-                "properties of calendars",
-                "count of calendars",
-            ],
-        }
-    elif app_name == "Contacts":
-        return {
-            "basic_properties": basic_properties,
-            "classes": ["person", "group"],
-            "collections": ["people", "groups"],
-            "examples": [
-                "name of people",
-                "name of groups",
-                "email of people",
-                'people whose name contains "Smith"',
-                "properties of people",
-                "count of people",
-            ],
-        }
-    elif app_name == "Music" or app_name == "iTunes":
-        return {
-            "basic_properties": basic_properties,
-            "classes": ["track", "playlist", "artist", "album"],
-            "collections": ["tracks", "playlists", "artists", "albums"],
-            "examples": [
-                "name of playlists",
-                "name of tracks",
-                "artist of tracks",
-                'tracks whose artist contains "Beatles"',
-                "properties of playlists",
-                "count of tracks",
-            ],
-        }
-    elif app_name == "Finder":
-        return {
-            "basic_properties": basic_properties,
-            "classes": ["file", "folder", "disk", "window"],
-            "collections": ["files", "folders", "disks", "windows"],
-            "examples": [
-                "name of folders",
-                "name of files",
-                "count of windows",
-                'files whose name contains ".txt"',
-                "properties of folders",
-            ],
+            "classes": classes,
+            "collections": collections,
+            "class_properties": class_properties,
+            "creation_examples": creation_examples,
+            "query_examples": query_examples,
+            "modification_examples": modification_examples,
+            "date_formats": date_format_info,
+            "source": f"Extracted from {api_file_path}",
         }
 
-    # For apps we don't have specific knowledge about, try to get some basic info
-    # and provide generic examples
+    # For apps we don't have an API definition for, provide generic information
     return {
         "basic_properties": basic_properties,
+        "generic_notes": [
+            "AppleScript follows a natural language syntax with some specific patterns:",
+            "- To get properties: 'property of object'",
+            "- To find objects: 'objects whose property is value'",
+            "- To create objects: 'make new class at location with properties {prop1:value1, prop2:value2}'",
+            "- To modify objects: 'set property of object to value'",
+            "- To delete objects: 'delete object'",
+        ],
         "generic_examples": [
+            "# Get application properties",
+            "properties",
+            "# Get windows",
+            "name of windows",
+            "# Count objects",
+            "count of windows",
+        ],
+        "query_examples": [
+            "# Get basic app properties",
             "name",
             "version",
-            "frontmost",
-            "properties",  # Get all properties
-            "count of windows",
-            "name of windows",
+            "# Get all windows",
+            "windows",
         ],
-        "note": "Use get_app_resource to query these properties",
+        "date_formats": date_format_info,
+        "note": "No API definition found for this application. Using generic information.",
     }
 
 
@@ -550,8 +668,13 @@ def register_app_resources(app_name: str):
     # Register collection access functions
     if "collections" in resources:
         for collection in resources["collections"]:
+            # Sanitize collection name for function name (replace spaces with underscores)
+            sanitized_collection = collection.replace(" ", "_")
+
             # Create function name: calendar_get_calendars, contacts_get_people, etc.
-            func_name = f"{app_name.lower().replace(' ', '_')}_get_{collection}"
+            func_name = (
+                f"{app_name.lower().replace(' ', '_')}_get_{sanitized_collection}"
+            )
 
             # Skip if function already exists
             if func_name in globals():
@@ -581,7 +704,7 @@ def register_app_resources(app_name: str):
 
             # Also create a function to get names of the collection
             name_func_name = (
-                f"{app_name.lower().replace(' ', '_')}_get_{collection}_names"
+                f"{app_name.lower().replace(' ', '_')}_get_{sanitized_collection}_names"
             )
             name_func_def = f"def {name_func_name}():"
             name_body = [
