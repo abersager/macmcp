@@ -15,6 +15,9 @@ mcp = FastMCP("macmcp")
 registered_apps = {}
 active_apps: Set[str] = set()
 
+# Store parameter maps for functions
+param_maps = {}
+
 # Configuration file path
 CONFIG_FILE = "applescript_apis/tool_config.json"
 
@@ -168,44 +171,60 @@ def get_command_info(app_name: str, command_name: str) -> Dict[str, Any]:
 
 
 def run_applescript_command(
-    app_name: str, command: str, parameters: Optional[Dict[str, Any]] = None
+    app_name: str,
+    command: str,
+    parameters: Optional[Dict[str, Any]] = None,
+    param_map: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Run an AppleScript command and return the result"""
     try:
         script_parts = [f'tell application "{app_name}"']
 
         if parameters and len(parameters) > 0:
-            param_str = ""
-            for key, value in parameters.items():
-                if key == "self":  # Skip 'self' parameter if it exists
+            param_str_parts = []
+            for py_name, value in parameters.items():
+                if py_name == "self":  # Skip 'self' parameter if it exists
                     continue
 
-                # Handle the case where we added an underscore to a reserved keyword
-                orig_key = key
-                if key.endswith("_") and key[:-1] in keyword.kwlist:
-                    orig_key = key[:-1]
+                # Get the original AppleScript parameter name from the map
+                original_name = (
+                    param_map.get(py_name, py_name) if param_map else py_name
+                )
 
+                # In AppleScript, parameter names should NOT be quoted
+                as_param_name = original_name
+
+                # --- Value formatting (same as before) ---
                 if isinstance(value, bool):
                     value_str = "true" if value else "false"
                 elif isinstance(value, str):
-                    value_str = f'"{value}"'
+                    # Basic escaping for quotes within strings
+                    escaped_value = value.replace('"', '\\"')
+                    value_str = f'"{escaped_value}"'
                 elif isinstance(value, dict):
-                    # Handle record type parameters
                     record_parts = []
                     for k, v in value.items():
                         if isinstance(v, bool):
                             v_str = "true" if v else "false"
                         elif isinstance(v, str):
-                            v_str = f'"{v}"'
+                            escaped_v = v.replace('"', '\\"')
+                            v_str = f'"{escaped_v}"'
                         else:
                             v_str = str(v)
                         record_parts.append(f"{k}:{v_str}")
                     value_str = "{{" + ", ".join(record_parts) + "}}"
                 else:
                     value_str = str(value)
+                # --- End Value Formatting ---
 
-                param_str += f" with {orig_key} {value_str}"
+                # Use the correct AppleScript syntax:
+                # If the parameter already starts with "with", don't add another "with"
+                if as_param_name.startswith("with "):
+                    param_str_parts.append(f" {as_param_name} {value_str}")
+                else:
+                    param_str_parts.append(f" with {as_param_name} {value_str}")
 
+            param_str = "".join(param_str_parts)
             script_parts.append(f"{command}{param_str}")
         else:
             script_parts.append(command)
@@ -218,12 +237,15 @@ def run_applescript_command(
         debug_print(f"Executing AppleScript:\n{full_script}")
 
         result = subprocess.run(
-            ["osascript", "-e", full_script], capture_output=True, text=True
+            ["osascript", "-e", full_script],
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if result.returncode != 0:
             debug_print(f"AppleScript error: {result.stderr}")
-            return f"Error: {result.stderr}"
+            return f"Error: {result.stderr.strip()}"
 
         return result.stdout.strip()
     except Exception as e:
@@ -266,77 +288,81 @@ def register_app_commands(app_name: str, api_data: Dict[str, Any]):
         return
 
     debug_print(f"Registering commands for {app_name}")
-    # Initialize the list for the app if it doesn't exist
     if app_name not in registered_apps:
         registered_apps[app_name] = []
 
-    # Iterate through suites, then commands within each suite
     for suite in api_data.get("suites", []):
         for cmd in suite.get("commands", []):
             try:
-                command_name = cmd["name"]
-                # Avoid duplicate command registration if multiple suites define it
-                if command_name not in registered_apps[app_name]:
-                    registered_apps[app_name].append(command_name)
+                original_command_name = cmd["name"]
+                if original_command_name not in registered_apps[app_name]:
+                    registered_apps[app_name].append(original_command_name)
 
-                # Create a unique function name by prefixing with app name
-                func_name = f"{app_name.lower().replace(' ', '_')}_{command_name.lower().replace(' ', '_').replace('-', '_')}"
+                func_name = f"{app_name.lower().replace(' ', '_')}_{original_command_name.lower().replace(' ', '_').replace('-', '_')}"
 
-                # Build parameter definitions
-                params = []
+                # --- Parameter Handling ---
+                python_params = []  # For function definition
+                param_map_to_original = {}  # For mapping back in run_command
                 for param in cmd.get("parameters", []):
-                    param_name = param["name"]
-                    # Sanitize the name: replace spaces and hyphens with underscores
-                    param_name = param_name.replace(" ", "_").replace("-", "_")
+                    original_name = param["name"]
+                    sanitized_name = original_name.replace(" ", "_").replace("-", "_")
+                    if keyword.iskeyword(sanitized_name):
+                        sanitized_name = f"{sanitized_name}_"
 
-                    # Handle Python reserved keywords by appending underscore
-                    if keyword.iskeyword(param_name):
-                        param_name = f"{param_name}_"
+                    param_map_to_original[sanitized_name] = original_name
 
                     if param.get("required", True):
-                        params.append(param_name)
+                        python_params.append(sanitized_name)
                     else:
                         default_value = param.get("default", None)
                         if default_value is None:
                             default_value = "None"
                         elif isinstance(default_value, str):
-                            default_value = f"'{default_value}'"
-                        params.append(f"{param_name}={default_value}")
+                            # Ensure quotes within defaults are handled if needed, though exec might handle this
+                            default_value = repr(default_value)
+                        python_params.append(f"{sanitized_name}={default_value}")
+                # --- End Parameter Handling ---
 
-                # Create the function definition
-                func_def = f"def {func_name}({', '.join(params)}):"
+                func_def = f"def {func_name}({', '.join(python_params)}):"
 
-                # Build the function body
                 body = []
                 body.append(
-                    '    """'
-                    + cmd.get("description", "Execute AppleScript command")
-                    + '"""'
+                    f'    """{cmd.get("description", "Execute AppleScript command")}"""'
                 )
                 body.append("    try:")
-                body.append("        return run_applescript_command(")
-                body.append(f"            '{app_name}',")
-                body.append(f"            '{command_name}',")
-                body.append("            locals()")
-                body.append("        )")
+                # Use global param_maps instead of local variable
+                body.append(f"        param_map = param_maps.get('{func_name}', {{}})")
+                body.append(
+                    "        local_params = {k: v for k, v in locals().items() if k != 'param_map'}"
+                )
+                body.append(
+                    f"        return run_applescript_command('{app_name}', '{original_command_name}', local_params, param_map)"
+                )
                 body.append("    except Exception as e:")
                 body.append("        return f'Error: {str(e)}'")
 
                 # Create the function
                 func_code = "\n".join([func_def] + body)
-                # Avoid re-creating/re-registering function if already done
+
                 if func_name not in globals():
                     debug_print(f"Creating function:\n{func_code}")
-                    # Add the function to the global namespace
-                    exec(func_code, globals())
+                    # Store parameter map in global param_maps dictionary
+                    param_maps[func_name] = param_map_to_original
+                    # Prepare context for exec with access to necessary globals
+                    exec_globals = globals().copy()  # Use a copy of globals
+                    exec(func_code, exec_globals)
+
+                    # Copy the function from globals back to our context
+                    func = exec_globals[func_name]
 
                     # Register the function as an MCP tool
-                    func = globals()[func_name]
                     mcp.tool()(func)
+                    # Add to global namespace so it can be accessed by other code
+                    globals()[func_name] = func
 
             except Exception as e:
                 debug_print(
-                    f"Error registering command {command_name} for {app_name} in suite {suite.get('name')}: {e}"
+                    f"Error registering command {original_command_name} for {app_name} in suite {suite.get('name')}: {e}"
                 )
                 continue
 
@@ -362,6 +388,46 @@ def initialize_server():
     debug_print(f"Total command count: {registered_count}")
     debug_print(f"Active applications: {active_count}")
     debug_print("Use list_applescript_apps() to discover available applications")
+
+
+@mcp.tool()
+def get_app_resource(app_name: str, resource_path: str) -> Any:
+    """
+    Get a resource or property from an application using AppleScript.
+
+    Args:
+        app_name: The name of the application to query
+        resource_path: The resource path to retrieve (e.g. 'name of calendars', 'events of calendar "Work"')
+
+    Returns:
+        The value of the requested resource
+    """
+    if app_name not in registered_apps and app_name not in active_apps:
+        return f"Error: Application '{app_name}' not registered or activated"
+
+    try:
+        script = f"""
+tell application "{app_name}"
+    get {resource_path}
+end tell
+"""
+        debug_print(f"Executing AppleScript for resource retrieval:\n{script}")
+
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            debug_print(f"AppleScript error: {result.stderr}")
+            return f"Error: {result.stderr.strip()}"
+
+        return result.stdout.strip()
+    except Exception as e:
+        debug_print(f"Error executing AppleScript: {e}")
+        return f"Error: {str(e)}"
 
 
 if __name__ == "__main__":
