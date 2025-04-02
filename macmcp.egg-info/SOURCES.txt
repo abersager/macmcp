@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+setup.py
+macmcp/__init__.py
+macmcp/macmcp.py
+macmcp.egg-info/PKG-INFO
+macmcp.egg-info/SOURCES.txt
+macmcp.egg-info/dependency_links.txt
+macmcp.egg-info/requires.txt
+macmcp.egg-info/top_level.txt
+tests/test_macmcp.py
