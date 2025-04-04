@@ -5,8 +5,22 @@ import subprocess
 import keyword
 import builtins
 import sys
+import logging
 from typing import Any, Dict, List, Optional, Set
 import time
+
+# Setup logging
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(LOG_DIR, "applescript_commands.log")),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+logger = logging.getLogger("macmcp")
 
 # Create an MCP server
 mcp = FastMCP("macmcp")
@@ -18,14 +32,16 @@ active_apps: Set[str] = set()
 # Store parameter maps for functions
 param_maps = {}
 
-# Configuration file path
-CONFIG_FILE = "applescript_apis/tool_config.json"
+# Configuration file path - use absolute path to avoid directory issues
+CONFIG_FILE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "config", "tool_config.json")
+)
+logger.info(f"Using config: {CONFIG_FILE}")
 
 
 def debug_print(message):
     """Print debug messages to stderr"""
-    sys.stderr.write(str(message) + "\n")
-    sys.stderr.flush()
+    logger.debug(message)
 
 
 def load_config() -> set:
@@ -35,22 +51,40 @@ def load_config() -> set:
             with open(CONFIG_FILE, "r") as f:
                 config = json.load(f)
                 active_apps = set(config.get("active_apps", []))
-                debug_print(f"Loaded configuration: {len(active_apps)} active apps")
+                logger.info(f"Loaded configuration: {len(active_apps)} active apps")
                 return active_apps
+        else:
+            logger.warning(f"Config file not found at {CONFIG_FILE}")
     except Exception as e:
-        debug_print(f"Error loading config: {e}")
+        logger.error(f"Error loading config: {e}")
     return set()
 
 
 def save_config(active_apps: set) -> None:
     """Save active applications to config file"""
     try:
+        # Log the actual path being used
+        config_dir = os.path.dirname(CONFIG_FILE)
+        logger.info(f"Saving config to: {CONFIG_FILE}")
+        logger.info(f"Config directory: {config_dir}")
+
+        # Create config directory if it doesn't exist
+        if config_dir:  # Make sure we're not trying to create an empty directory
+            os.makedirs(config_dir, exist_ok=True)
+            logger.info(f"Created/confirmed directory: {config_dir}")
+        else:
+            logger.error("Config directory path is empty!")
+            return
+
         config = {"active_apps": list(active_apps)}
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=2)
-        debug_print("Configuration saved")
+        logger.info(
+            f"Configuration saved successfully with {len(active_apps)} active apps"
+        )
     except Exception as e:
-        debug_print(f"Error saving config: {e}")
+        logger.error(f"Error saving config: {e}")
+        logger.exception("Detailed error information:")
 
 
 # Add tools to manage active/inactive apps
@@ -70,13 +104,22 @@ def get_inactive_apps() -> List[str]:
 def activate_app(app_name: str) -> str:
     """Activate an application's tools"""
     if app_name not in registered_apps:
+        logger.warning(f"Application '{app_name}' not found in registered apps")
         return f"Error: Application '{app_name}' not found"
 
-    active_apps.add(app_name)
-    save_config(active_apps)
+    # Try to add to active apps and save configuration
+    try:
+        logger.info(f"Activating app: {app_name}")
+        active_apps.add(app_name)
+        save_config(active_apps)
+    except Exception as e:
+        logger.error(f"Error while activating {app_name}: {e}")
+        logger.exception("Detailed activation error:")
+        # Continue anyway since the app is in active_apps even if config save failed
 
     # Re-register all commands for this app
-    debug_print(f"Re-registering commands for {app_name}")
+    logger.info(f"Re-registering commands for {app_name}")
+    api_registered = False
     for api_file in os.listdir("applescript_apis"):
         if api_file.endswith(".json"):
             try:
@@ -84,13 +127,18 @@ def activate_app(app_name: str) -> str:
                     api_data = json.load(f)
                     if api_data.get("applicationName") == app_name:
                         register_app_commands(app_name, api_data)
+                        api_registered = True
                         break
             except Exception as e:
-                debug_print(f"Error loading API file {api_file}: {e}")
+                logger.error(f"Error loading API file {api_file}: {e}")
+
+    if not api_registered:
+        logger.warning(f"No API definition found for {app_name}")
 
     # Register resource access functions for this app
     register_app_resources(app_name)
 
+    # Return success even if config couldn't be saved - the app is still activated for this session
     return f"Activated {app_name}"
 
 
@@ -125,8 +173,10 @@ def activate_all_apps() -> str:
 def deactivate_all_apps() -> str:
     """Deactivate all application tools"""
     global active_apps
+
     active_apps.clear()
     save_config(active_apps)
+
     return "Deactivated all applications"
 
 
@@ -236,8 +286,10 @@ def run_applescript_command(
 
         full_script = "\n".join(script_parts)
 
-        # For debugging
-        debug_print(f"Executing AppleScript:\n{full_script}")
+        # Log the command and parameters
+        logger.info(f"APPLESCRIPT COMMAND - App: {app_name}, Command: {command}")
+        logger.debug(f"Parameters: {parameters}")
+        logger.debug(f"Full Script:\n{full_script}")
 
         result = subprocess.run(
             ["osascript", "-e", full_script],
@@ -247,12 +299,13 @@ def run_applescript_command(
         )
 
         if result.returncode != 0:
-            debug_print(f"AppleScript error: {result.stderr}")
+            logger.error(f"AppleScript error: {result.stderr}")
             return f"Error: {result.stderr.strip()}"
 
+        logger.info(f"Command result: {result.stdout.strip()}")
         return result.stdout.strip()
     except Exception as e:
-        debug_print(f"Error executing AppleScript: {e}")
+        logger.exception(f"Error executing AppleScript: {e}")
         return f"Error: {str(e)}"
 
 
@@ -287,10 +340,10 @@ def load_applescript_apis():
 def register_app_commands(app_name: str, api_data: Dict[str, Any]):
     """Register commands for an application"""
     if app_name not in active_apps:
-        debug_print(f"Skipping registration for inactive app: {app_name}")
+        logger.info(f"Skipping registration for inactive app: {app_name}")
         return
 
-    debug_print(f"Registering commands for {app_name}")
+    logger.info(f"Registering commands for {app_name}")
     if app_name not in registered_apps:
         registered_apps[app_name] = []
 
@@ -348,7 +401,7 @@ def register_app_commands(app_name: str, api_data: Dict[str, Any]):
                 func_code = "\n".join([func_def] + body)
 
                 if func_name not in globals():
-                    debug_print(f"Creating function:\n{func_code}")
+                    logger.debug(f"Creating function:\n{func_code}")
                     # Store parameter map in global param_maps dictionary
                     param_maps[func_name] = param_map_to_original
                     # Prepare context for exec with access to necessary globals
@@ -364,10 +417,9 @@ def register_app_commands(app_name: str, api_data: Dict[str, Any]):
                     globals()[func_name] = func
 
             except Exception as e:
-                debug_print(
+                logger.error(
                     f"Error registering command {original_command_name} for {app_name} in suite {suite.get('name')}: {e}"
                 )
-                continue
 
 
 @mcp.tool()
@@ -375,27 +427,29 @@ def initialize_server():
     """Initialize the MCP server by loading APIs and configuration"""
     global active_apps  # Declares intent to modify global
 
-    debug_print("Loading configuration...")
+    logger.info("Loading configuration...")
     # Assigns the result of load_config() to the global active_apps
-    active_apps = load_config()
+    loaded_apps = load_config()
 
-    debug_print("Loading AppleScript APIs...")
+    active_apps = loaded_apps
+
+    logger.info("Loading AppleScript APIs...")
     load_applescript_apis()  # Calls register_app_commands which reads global active_apps
 
-    debug_print("Registering resource access tools...")
+    logger.info("Registering resource access tools...")
     # Register resource tools for all active apps
     for app_name in active_apps:
         register_app_resources(app_name)
 
-    debug_print("MCP Server initialization complete.")
+    logger.info("MCP Server initialization complete.")
     active_count = len(active_apps)
     registered_count = sum(len(cmds) for cmds in registered_apps.values())
-    debug_print(
+    logger.info(
         f"Successfully registered {active_count} applications with AppleScript commands"
     )
-    debug_print(f"Total command count: {registered_count}")
-    debug_print(f"Active applications: {active_count}")
-    debug_print("Use list_applescript_apps() to discover available applications")
+    logger.info(f"Total command count: {registered_count}")
+    logger.info(f"Active applications: {active_count}")
+    logger.info("Use list_applescript_apps() to discover available applications")
 
 
 @mcp.tool()
@@ -412,6 +466,7 @@ def get_app_resource(app_name: str, resource_path: str) -> Any:
         The value of the requested resource or result of the command
     """
     if app_name not in registered_apps and app_name not in active_apps:
+        logger.warning(f"Application '{app_name}' not registered or activated")
         return f"Error: Application '{app_name}' not registered or activated"
 
     try:
@@ -420,7 +475,11 @@ tell application "{app_name}"
     {resource_path}
 end tell
 """
-        debug_print(f"Executing AppleScript for resource retrieval:\n{script}")
+        # Log the resource access
+        logger.info(
+            f"APPLESCRIPT RESOURCE - App: {app_name}, Resource: {resource_path}"
+        )
+        logger.debug(f"Full script:\n{script}")
 
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -430,25 +489,29 @@ end tell
         )
 
         if result.returncode != 0:
-            debug_print(f"AppleScript error: {result.stderr}")
+            logger.error(f"AppleScript error: {result.stderr}")
             error_msg = result.stderr.strip()
 
             # Provide more helpful information for common errors
+            suggestion = ""
             if "syntax error" in error_msg:
                 if "date" in error_msg:
-                    return f'Error: {error_msg}\n\nSuggestion: AppleScript date formats can be tricky. Try using one of these formats:\n- date "2023-04-15 14:30:00"\n- current date\n- (current date) + 30 * minutes'
+                    suggestion = '\n\nSuggestion: AppleScript date formats can be tricky. Try using one of these formats:\n- date "2023-04-15 14:30:00"\n- current date\n- (current date) + 30 * minutes'
                 elif "Expected" in error_msg and "but found" in error_msg:
-                    return f"Error: {error_msg}\n\nSuggestion: This appears to be an AppleScript syntax error. Check the command structure. For reference, use list_app_resources('{app_name}') to see example commands."
+                    suggestion = f"\n\nSuggestion: This appears to be an AppleScript syntax error. Check the command structure. For reference, use list_app_resources('{app_name}') to see example commands."
             elif "Invalid date" in error_msg:
-                return f'Error: {error_msg}\n\nSuggestion: Try using the format date "YYYY-MM-DD HH:MM:SS" or current date.'
+                suggestion = '\n\nSuggestion: Try using the format date "YYYY-MM-DD HH:MM:SS" or current date.'
             elif "not found" in error_msg:
-                return f"Error: {error_msg}\n\nSuggestion: The specified resource wasn't found. Check that the object exists."
+                suggestion = "\n\nSuggestion: The specified resource wasn't found. Check that the object exists."
 
-            return f"Error: {error_msg}"
+            error_result = f"Error: {error_msg}{suggestion}"
+            logger.debug(f"Error with suggestion: {error_result}")
+            return error_result
 
+        logger.info(f"Resource result: {result.stdout.strip()}")
         return result.stdout.strip()
     except Exception as e:
-        debug_print(f"Error executing AppleScript: {e}")
+        logger.exception(f"Error executing AppleScript: {e}")
         return f"Error: {str(e)}"
 
 
@@ -489,7 +552,7 @@ def list_app_resources(app_name: str) -> Dict[str, Any]:
     api_data = None
 
     for file_name in os.listdir("applescript_apis"):
-        if file_name.endswith(".json") and not file_name == "tool_config.json":
+        if file_name.endswith(".json"):
             try:
                 with open(os.path.join("applescript_apis", file_name), "r") as f:
                     file_data = json.load(f)
@@ -657,10 +720,10 @@ def register_app_resources(app_name: str):
     This creates functions like app_get_resource_name() that directly access common resources.
     """
     if app_name not in active_apps:
-        debug_print(f"Skipping resource registration for inactive app: {app_name}")
+        logger.info(f"Skipping resource registration for inactive app: {app_name}")
         return
 
-    debug_print(f"Registering resource access tools for {app_name}")
+    logger.info(f"Registering resource access tools for {app_name}")
 
     # Get information about the app's resources
     resources = list_app_resources(app_name)
@@ -693,7 +756,7 @@ def register_app_resources(app_name: str):
             func_code = "\n".join([func_def] + body)
 
             # Create the function
-            debug_print(f"Creating resource access function:\n{func_code}")
+            logger.debug(f"Creating resource access function:\n{func_code}")
             exec_globals = globals().copy()
             exec(func_code, exec_globals)
 
@@ -718,7 +781,7 @@ def register_app_resources(app_name: str):
             name_func_code = "\n".join([name_func_def] + name_body)
 
             # Create the name function
-            debug_print(f"Creating resource name function:\n{name_func_code}")
+            logger.debug(f"Creating resource name function:\n{name_func_code}")
             name_exec_globals = globals().copy()
             exec(name_func_code, name_exec_globals)
 
@@ -750,7 +813,7 @@ def register_app_resources(app_name: str):
             func_code = "\n".join([func_def] + body)
 
             # Create the function
-            debug_print(f"Creating property function:\n{func_code}")
+            logger.debug(f"Creating property function:\n{func_code}")
             exec_globals = globals().copy()
             exec(func_code, exec_globals)
 

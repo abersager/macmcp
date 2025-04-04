@@ -6,7 +6,7 @@ import sys
 app = Flask(__name__)
 
 # Configuration file path
-CONFIG_FILE = "applescript_apis/tool_config.json"
+CONFIG_FILE = "config/tool_config.json"
 
 
 def debug_print(message):
